@@ -17,124 +17,132 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
 import os
-from statistics import mode
-from typing import Any, Callable, List, Optional, Tuple
+from cProfile import label
+from csv import reader
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import imageio
 import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
+from tomlkit import value
+from torch.nn.functional import interpolate
 from torch.utils.data import Dataset
 
 
-class DARDatasetOnImages(Dataset):
+def _load_video_frames(reader:imageio.plugins.ffmpeg.FfmpegFormat.Reader, frame_no:int, n_frames:int = 1):
+        reader.set_image_index(frame_no - n_frames)
+        frame = [reader.get_next_data()[:, :, ::-1] for i in range(n_frames)]
+        return frame
+
+def _get_multi_view_frames(readers:List[imageio.plugins.ffmpeg.FfmpegFormat.Reader], frame_no:int, n_frames:int) -> List[List[np.ndarray]]:
+        views = []
+        for reader in readers:
+            imgs:List[np.ndarray] = _load_video_frames(reader, frame_no, n_frames)
+            for i in range(n_frames):
+                imgs[i] = imgs[i].mean(axis=-1).astype(np.float32)
+                imgs[i] /= 255.
+
+            views += [imgs]
+        return views
+class DARDatasetOnVideos(Dataset):
 
     def __init__(self, root: str,
                  transform: Optional[Callable] = None,
                  target_transform: Optional[Callable] = None,
-                 img_size : Tuple[int, int] = (200, 200),
+                 img_size: Tuple[int, int] = (200, 200),
                  seq_length: int = 5,
-                 seq_type: str = 'trailing') -> None:
+                 remove_unlabeled: bool = True,
+                 test_user_ids: List[str] = ["user_id_49381"],
+                 load_reader_instances:bool = False) -> None:
         super().__init__()
-        assert(seq_type in ['trailing', 'forward', 'symmetric'])
         self.root = root # Training root directory
         self.transform = transform # Image transforms
         self.target_transform = target_transform # Target transforms
         self.img_size = img_size # Image size
         self.seq_length = seq_length # sequence length
-        self.seq_type = seq_type # sequence type to sample
-        self.label_dfs : List[pd.DataFrame] = None # List of Label dataset
-        self.data_dir_paths : List[str] = None
+        self.remove_unlabeled = remove_unlabeled # Whether to remvoe unlabeled data(-1 class_id)
+        self.test_user_ids = test_user_ids # Removed from train set
+        self.load_reader_instances = load_reader_instances # If true stores video reader instances, instead of path
+        self.labels : Dict[str, Tuple[Dict[str, Any], np.ndarray]] = None # user_id/session_id : view : (video_path, labels)
         self.user_ids : List[str] = None
-        self._n_frames : List[int] = None
-        self._n_frames_up_to : List[int] = None
+        self._n_labels : Dict[str, int] = None
         self.n : int = None
         self.views : List[str] = ['Dashboard', 'Rearview', 'Rightside window']
 
-    def datainit(self):
+        self._datainit()
+
+    def _datainit(self):
         self.user_ids = os.listdir(self.root) # Populate user IDs
-        self.data_dir_paths = []
-        self.label_dfs = []
-        self._n_frames = []
+        train_user_ids = []
+        for user_id_ in self.user_ids:
+            if user_id_ not in self.test_user_ids:
+                train_user_ids += [user_id_]
+        self.user_ids = train_user_ids
+        self.labels = {}
+        self._n_labels = {}
         self.n = 0
         for user in self.user_ids:
             id_dir = os.path.join(self.root, user)
-            session_ids = os.listdir(id_dir)
+            session_ids = []
+            for dir_elem in os.listdir(id_dir):
+                if dir_elem.startswith("session"):
+                    session_ids += [dir_elem]
             for session_id_ in session_ids:
-                self.data_dir_paths += [os.path.join(id_dir, session_id_)]
-                dashboard_view_files = os.listdir(os.path.join(self.data_dir_paths[-1], 'Dashboard'))
-                rearview_view_files = os.listdir(os.path.join(self.data_dir_paths[-1], 'Rearview'))
-                rightside_view_files = os.listdir(os.path.join(self.data_dir_paths[-1], 'Rightside window'))
-                label_df = pd.read_csv(os.path.join(self.data_dir_paths[-1], 'labels.csv'), index_col=0)
-                drop_idx = []
-                for i, frame_id in enumerate(label_df.loc[:, 'frame_idx'].values):
-                    frame_name = str(frame_id)+'.jpg'
-                    if not (frame_name in dashboard_view_files and \
-                        frame_name in rearview_view_files and \
-                        frame_name in rightside_view_files):
-                            drop_idx += [i]
-                label_df.drop(drop_idx, inplace=True)
-                self._n_frames += [label_df.shape[0]]
+                label_df = pd.read_csv(os.path.join(os.path.join(id_dir, session_id_), 'labels.csv'), index_col=0)
+                videos_df = pd.read_csv(os.path.join(os.path.join(id_dir, session_id_), 'vid_files.csv'), index_col=1)
+
+                session_key = user + '/' + session_id_
+                print(session_key)
+                view_file_paths: Dict[str, str] = {}
+                for view in self.views:
+                    view_file_paths[view] = os.path.join(id_dir, videos_df.loc[view].values[0])
+                    if self.load_reader_instances:
+                        view_file_paths[view] = imageio.get_reader(view_file_paths[view], 'ffmpeg')
+
+                if self.remove_unlabeled:
+                    label_df = label_df[label_df.iloc[:, 2] != -1]
+
+                self.labels[session_key] = (view_file_paths, np.array(label_df.values, dtype=np.int32))
+                self._n_labels[session_key] = label_df.shape[0]
                 self.n += label_df.shape[0]
-                self.label_dfs += [label_df]
-        self._n_frames_up_to = np.cumsum(self._n_frames)
 
-    def reduce_idx(self, index: int) -> Tuple[str, pd.DataFrame, int]:
+    def reduce_idx(self, index: int) -> Tuple[str, int]:
         n_elements = index+1
-        data_dir_path : str = None
-        df : pd.DataFrame = None
-        idx : int = None
+        session_key, idx = None, None
 
-        for i, n in enumerate(self._n_frames_up_to):
-            if n > n_elements:
-                data_dir_path = self.data_dir_paths[i]
-                df = self.label_dfs[i]
-                idx = n_elements-1 if i == 0 else n_elements-self._n_frames_up_to[i-1]-1
+        for key, value in self._n_labels.items():
+            if n_elements <= value:
+                idx = n_elements - 1
+                session_key = key
                 break
+            n_elements -= value
 
-        return data_dir_path, df, idx
-
-    def get_multi_vuew_frame(self, file_paths:List[str]) -> torch.Tensor:
-        views = []
-        for file in file_paths:
-            assert(file.endswith('.jpg'))
-            img = Image.open(file, mode='L')
-            img = img.resize(self.img_size)
-            img = np.asarray(img, dtype=np.uint8).astype(np.float32)
-            img /= 255.
-            views += [img]
-        views = torch.from_numpy(np.array(views, dtype=np.float32))
-        return views
+        return session_key, idx
 
     def __getitem__(self, index: int) -> Any:
-        data_dir_path, df, idx = self.reduce_idx(index) # Find out relevant data directory, dataframe, and reduced index
+        session_key, idx = self.reduce_idx(index) # Find out relevant data directory, dataframe, and reduced index
 
-        # Get a patch of required seq length on both side of index
-        left_idx, right_idx = None, None
-        if self.seq_type == 'trailing':
-            left_idx, right_idx = idx - self.seq_length, idx+1
-        elif self.seq_type == 'forward':
-            left_idx, right_idx = idx, idx + self.seq_length + 1
-        elif self.seq_type == 'symmetric':
-            left_idx, right_idx = idx - self.seq_length//2, idx + self.seq_length//2+1
-        else:
-            raise NotImplementedError
+        reader_dict, label = self.labels[session_key]
+        readers = [val if self.load_reader_instances else imageio.get_reader(val, 'ffmpeg') for _, val in reader_dict.items()]
 
-        data_sample = []
-        left_deficit_frames, right_deficit_frames = 0, 0
-        if left_idx < 0:
-            left_deficit_frames = abs(left_idx)
-            left_idx = 0
+        frame_start, frame_end, target = label[idx]
+        frame_no = np.random.randint(frame_start, frame_end+1, 1)[0]
 
-        if right_idx >= df.shape[0]:
-            right_deficit_frames = right_idx - df.shape[0] - 1
-            right_idx = df.shape[0]
+        data = _get_multi_view_frames(readers, frame_no, self.seq_length)
 
-        frame_labels = np.asarray(df.loc[left_idx:right_idx, 3].values, dtype=np.int8)
-        frame_idxs = np.asarray(df.loc[left_idx:right_idx, 2].values, dtype=np.int32)
+        tensor_data = []
+        for i in range(self.seq_length):
+            view = []
+            for j in range(3):
+                view += [torch.from_numpy(data[j][i]).unsqueeze(dim=0)]
+            tensor_data += [torch.cat(view, dim=0)]
 
-        for frame_id in frame_idxs:
-            raise
+        tensor_data = torch.cat(tensor_data, dim=0).unsqueeze(dim=0)
+        tensor_data = interpolate(tensor_data, self.img_size).squeeze(dim=0)
+
+        return tensor_data, target
 
     def __len__(self) -> int:
         assert(self.n != None)
@@ -144,12 +152,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     __HOME_DIR__ = os.getenv('HOME', '~')
     parser.add_argument('--root_dir', default=os.path.join(__HOME_DIR__, 'AI-City/A1'), help='Root directory path, for AI-City track3 dataset with folder A1, A2, and B')
+    parser.add_argument('--load_reader_instances', action='store_true', help='If given, then video reader instances will be created andstored in advance.')
     args = parser.parse_args()
 
-    dataset = DARDatasetOnImages(args.root_dir)
-    dataset.datainit()
-
-    print(dataset.data_dir_paths)
-
-    for df in dataset.label_dfs:
-        print(df.shape)
+    dataset = DARDatasetOnVideos(args.root_dir, load_reader_instances=args.load_reader_instances)
+    data = dataset.__getitem__(0)
+    print(f'Dataset element size : {data.shape}')

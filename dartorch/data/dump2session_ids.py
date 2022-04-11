@@ -17,8 +17,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
 import os
-from fractions import Fraction
-from time import time
 from typing import List
 
 import ffmpeg
@@ -85,8 +83,9 @@ def get_actual_file_name(files : List[str], id_dir : str):
         real_file_name = file
         for f in os.listdir(id_dir):
             f = f.split('.')[0]
-            if f.lower()[:-1].startswith(real_file_name.lower()[:-1]) and f.lower()[-1] == real_file_name.lower()[-1]:
+            if f.lower()[:-1].startswith(real_file_name.lower()[:4]) and f.lower()[-1] == real_file_name.lower()[-1]:
                 real_file_name = f
+                break
         real_file_names += [real_file_name+'.MP4']
 
     return real_file_names
@@ -117,10 +116,8 @@ def dump_labels_to_session_id_format(root:str,
 
     # Dumping labeled data
     user_ids_a1 = os.listdir(labeled_dir) # Get the user_id dirs list
-    # print(user_ids_a1)
 
     for id_ in user_ids_a1:
-        # print(id_)
         id_dir = os.path.join(labeled_dir, id_) # Path to user_id directory
 
         csv_label_id_ = None
@@ -128,7 +125,6 @@ def dump_labels_to_session_id_format(root:str,
             d = str(d)
             if d.lower().endswith('.csv') and d.lower().startswith('user'):
                 csv_label_id_ = str(d)
-
 
         label_file = os.path.join(id_dir, csv_label_id_) # labels file path
         # print(label_file)
@@ -167,19 +163,6 @@ def dump_labels_to_session_id_format(root:str,
             class_ids = np.array(loc_labels.iloc[:, 6], dtype=int)
             time_patches = np.array(loc_labels.iloc[:, [4, 5]], dtype = int)
 
-            # cam_views = np.unique(loc_labels.iloc[:, 2].values)
-            # assert(len(cam_views) == 1)
-
-
-            # view_target_folder_path = os.path.join(session_id_dir, str(cam_views[0]))
-            # os.makedirs(view_target_folder_path, exist_ok=True)
-
-            # real_file_name = file
-            # for f in os.listdir(id_dir):
-            #     f = f.split('.')[0]
-            #     if f.lower()[:-1].startswith(real_file_name.lower()[:-1]) and f.lower()[-1] == real_file_name.lower()[-1]:
-            #         real_file_name = f
-
             real_file_names = get_actual_file_name(files, id_dir)
             cam_views = get_cam_views_from_files(real_file_names)
             real_file_names_df = pd.DataFrame(np.array([real_file_names, cam_views]).T, columns=['Filename', 'Camview'])
@@ -194,115 +177,26 @@ def dump_labels_to_session_id_format(root:str,
             num_frames = reader.get_meta_data()['fps']*reader.get_meta_data()['duration']
             frame_rate = float(reader.get_meta_data()['fps'])
 
-            frame_ids = []
+            prev_frame = -1.
+            for time_patch, label in zip(time_patches, class_ids):
+                init_frame, end_frame = int(time_patch[0]*frame_rate), int(time_patch[1]*frame_rate)
+                if init_frame != prev_frame+1:
+                    loc_new_labels += [[min(prev_frame+1, num_frames), min(init_frame-1, num_frames), -1]]
 
-            for time_patch, label in zip(time_patches, labels):
-                frame_ids += [np.arange(int(time_patch[0]*frame_rate), int(time_patch[1]*frame_rate)+1)]
+                loc_new_labels += [[min(init_frame, num_frames), min(end_frame, num_frames), label]]
+                prev_frame = end_frame
 
-            # print(frame_ids)
-            # Can be reduced to a single step
-            for frame_ids_, class_id in zip(frame_ids, class_ids):
-                for frame_id in frame_ids_:
-                    if (frame_id >= num_frames or class_id == -1):
-                        continue
-                    loc_new_labels += [[frame_id, class_id]]
-
-            session_new_labels = pd.DataFrame(loc_new_labels, columns=['frame_idx', 'class_id'])
+            session_new_labels = pd.DataFrame(loc_new_labels, columns=['frame_idx_start', 'frame_idx_end', 'class_id'])
             session_labels_file_path = os.path.join(session_id_dir, 'labels.csv')
             session_new_labels.to_csv(session_labels_file_path)
-
-def dump_unlabeled_data_to_session_id_format(root:str,
-                              target:str,
-                              sub_dir:str):
-    assert(sub_dir in ['A1', 'A2', 'B'])
-
-    unlabeled_dir = os.path.join(root, sub_dir) # Source unlabeled data path
-
-    os.makedirs(target, exist_ok=True) # Create the target directory, escape if already exists
-
-    # Dumping labeled data
-    user_ids = os.listdir(unlabeled_dir) # Get the user_id dirs list
-
-    # Process each user id
-    for id_ in user_ids:
-        id_dir = os.path.join(unlabeled_dir, id_) # Path to user_id directory
-
-        vid_file_names:List[str] = os.listdir(id_dir) # Get the video file names
-        vid_file_names_:List[str] = []
-        for vid in vid_file_names:
-            if not str(vid).endswith('.MP4'):
-                continue
-
-            vid_file_names_ += [str(vid).split('.')[0]]
-
-        vid_file_names = np.array(vid_file_names_, dtype=str)
-
-        vid = [x.split('_')[-1] for x in vid_file_names] # Get session ids
-        uvid = np.unique(vid) # Get unique session ids
-
-        # get file_names corresponding to each session_id
-        # row repressents .MP4 file_names for each session_id
-        vid_file_names = [vid_file_names[s_match_idx] for s_match_idx in np.array([uvid]).T == np.array([vid])]
-
-        # Iterate through all the session ids and
-        # Dump that session id into session_id/view/frame_id.jpg format
-        for session_id, files in zip(uvid, vid_file_names):
-            session_id_dir = os.path.join(os.path.join(os.path.join(target, sub_dir), id_), session_id) # Session id directory path
-            os.makedirs(session_id_dir, exist_ok=True) # create the directory
-            loc_new_labels = []
-
-            session_new_labels:pd.DataFrame = None
-
-            generate_session_label = True
-
-            # For each view
-            for file in np.unique(files):
-
-                cam_view = None
-                if (file.startswith('Dashboard')):
-                    cam_view = 'Dashboard'
-                elif (file.startswith('Rear')):
-                    cam_view = 'Rearview'
-                elif (file.startswith('Right')):
-                    cam_view = 'Rightside window'
-                else:
-                    print(f'Camview can\'t be defined for session id : {session_id}, and file_name : {file}')
-
-                view_target_folder_path = os.path.join(session_id_dir, cam_view)
-                os.makedirs(view_target_folder_path, exist_ok=True)
-
-                view_video_path = os.path.join(id_dir, str(file)+'.MP4')
-
-                reader = imageio.get_reader(view_video_path)
-
-                print(f'Writing video file : {view_video_path}, to target folder : {view_target_folder_path}')
-                for frame_id, img in enumerate(reader):
-                    frame_path = os.path.join(view_target_folder_path, str(frame_id)+'.jpg')
-
-                    imageio.imwrite(frame_path, img)
-
-                    if generate_session_label:
-                        loc_new_labels += [[session_id, frame_id, -1]]
-
-                if generate_session_label:
-                    session_new_labels = pd.DataFrame(loc_new_labels, columns=['session id', 'frame_idx', 'class_id'])
-                    session_labels_file_path = os.path.join(session_id_dir, 'submission.csv')
-                    session_new_labels.to_csv(session_labels_file_path)
-                    generate_session_label = False
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     __HOME_DIR__ = os.getenv('HOME', '~')
     parser.add_argument('root_dir', default='', type=str, help='Root directory path, for AI-City track3 dataset with folder A1, A2, and B')
     parser.add_argument('--target_dir', default=os.path.join(__HOME_DIR__, 'AI-City'), type=str, help='Target directory path to dump the session id format data.')
-    parser.add_argument('--dump_labels', action='store_true', help='Dump labels in the session id, and frame id format.')
-    parser.add_argument('--dump_videos', action='store_true', help='Dump videos as images in the session id, and frame id format.')
     args = parser.parse_args()
 
-    if args.dump_labels:
-        dump_labels_to_session_id_format(args.root_dir, args.target_dir)
-
-    if args.dump_videos:
-        dump_unlabeled_data_to_session_id_format(args.root_dir, args.target_dir, 'A1')
+    dump_labels_to_session_id_format(args.root_dir, args.target_dir)
 
     print(f'Data successfully converted to session id format and stored in the folder {args.target_dir}')
