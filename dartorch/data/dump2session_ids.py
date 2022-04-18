@@ -177,9 +177,10 @@ def dump_labels_to_session_id_format(root:str,
             num_frames = reader.get_meta_data()['fps']*reader.get_meta_data()['duration']
             frame_rate = float(reader.get_meta_data()['fps'])
 
-            prev_frame = -1.
+            prev_frame = 0
             for time_patch, label in zip(time_patches, class_ids):
                 init_frame, end_frame = int(time_patch[0]*frame_rate), int(time_patch[1]*frame_rate)
+                init_frame = max(init_frame, 1)
                 if init_frame != prev_frame+1:
                     loc_new_labels += [[min(prev_frame+1, num_frames), min(init_frame-1, num_frames), -1]]
 

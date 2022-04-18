@@ -17,16 +17,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
 import os
-from cProfile import label
-from csv import reader
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import imageio
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
-from tomlkit import value
 from torch.nn.functional import interpolate
 from torch.utils.data import Dataset
 
@@ -51,11 +47,13 @@ class DARDatasetOnVideos(Dataset):
     def __init__(self, root: str,
                  transform: Optional[Callable] = None,
                  target_transform: Optional[Callable] = None,
-                 img_size: Tuple[int, int] = (200, 200),
+                 img_size: Tuple[int, int] = (256, 256),
                  seq_length: int = 5,
                  remove_unlabeled: bool = True,
                  test_user_ids: List[str] = ["user_id_49381"],
-                 load_reader_instances:bool = False) -> None:
+                 load_reader_instances:bool = False,
+                 shuffle_views:bool = True,
+                 mode:str = 'train') -> None:
         super().__init__()
         self.root = root # Training root directory
         self.transform = transform # Image transforms
@@ -65,6 +63,8 @@ class DARDatasetOnVideos(Dataset):
         self.remove_unlabeled = remove_unlabeled # Whether to remvoe unlabeled data(-1 class_id)
         self.test_user_ids = test_user_ids # Removed from train set
         self.load_reader_instances = load_reader_instances # If true stores video reader instances, instead of path
+        self.shuffle_views = shuffle_views # If true, views shuffled randomly
+        self.mode = mode
         self.labels : Dict[str, Tuple[Dict[str, Any], np.ndarray]] = None # user_id/session_id : view : (video_path, labels)
         self.user_ids : List[str] = None
         self._n_labels : Dict[str, int] = None
@@ -76,13 +76,19 @@ class DARDatasetOnVideos(Dataset):
     def _datainit(self):
         self.user_ids = os.listdir(self.root) # Populate user IDs
         train_user_ids = []
+        test_user_ids = []
+
         for user_id_ in self.user_ids:
             if user_id_ not in self.test_user_ids:
                 train_user_ids += [user_id_]
-        self.user_ids = train_user_ids
+            else:
+                test_user_ids += [user_id_]
+        self.user_ids = train_user_ids if self.mode == 'train' else test_user_ids
+
         self.labels = {}
         self._n_labels = {}
         self.n = 0
+
         for user in self.user_ids:
             id_dir = os.path.join(self.root, user)
             session_ids = []
@@ -98,15 +104,18 @@ class DARDatasetOnVideos(Dataset):
                 view_file_paths: Dict[str, str] = {}
                 for view in self.views:
                     view_file_paths[view] = os.path.join(id_dir, videos_df.loc[view].values[0])
-                    if self.load_reader_instances:
+                    if self.load_reader_instances or self.mode == 'test':
                         view_file_paths[view] = imageio.get_reader(view_file_paths[view], 'ffmpeg')
 
-                if self.remove_unlabeled:
+                if self.remove_unlabeled and self.mode == 'train':
                     label_df = label_df[label_df.iloc[:, 2] != -1]
 
+                n_frames = int(view_file_paths[view].get_meta_data()['fps'] * \
+                    view_file_paths[view].get_meta_data()['duration'])
+
                 self.labels[session_key] = (view_file_paths, np.array(label_df.values, dtype=np.int32))
-                self._n_labels[session_key] = label_df.shape[0]
-                self.n += label_df.shape[0]
+                self._n_labels[session_key] = label_df.shape[0] if self.mode == 'train' else n_frames
+                self.n += label_df.shape[0] if self.mode == 'train' else n_frames
 
     def reduce_idx(self, index: int) -> Tuple[str, int]:
         n_elements = index+1
@@ -121,15 +130,7 @@ class DARDatasetOnVideos(Dataset):
 
         return session_key, idx
 
-    def __getitem__(self, index: int) -> Any:
-        session_key, idx = self.reduce_idx(index) # Find out relevant data directory, dataframe, and reduced index
-
-        reader_dict, label = self.labels[session_key]
-        readers = [val if self.load_reader_instances else imageio.get_reader(val, 'ffmpeg') for _, val in reader_dict.items()]
-
-        frame_start, frame_end, target = label[idx]
-        frame_no = np.random.randint(frame_start, frame_end+1, 1)[0]
-
+    def __get_data(self, readers: List[imageio.plugins.ffmpeg.FfmpegFormat.Reader], frame_no: int) -> torch.Tensor:
         data = _get_multi_view_frames(readers, frame_no, self.seq_length)
 
         tensor_data = []
@@ -137,12 +138,47 @@ class DARDatasetOnVideos(Dataset):
             view = []
             for j in range(3):
                 view += [torch.from_numpy(data[j][i]).unsqueeze(dim=0)]
+            if self.shuffle_views:
+                np.random.shuffle(view)
             tensor_data += [torch.cat(view, dim=0)]
 
         tensor_data = torch.cat(tensor_data, dim=0).unsqueeze(dim=0)
         tensor_data = interpolate(tensor_data, self.img_size).squeeze(dim=0)
 
+        return tensor_data
+
+    def __getitem_train__(self, index: int) -> Any:
+        session_key, idx = self.reduce_idx(index) # Find out relevant data directory, dataframe, and reduced index
+
+        reader_dict, label = self.labels[session_key]
+        readers = [val if self.load_reader_instances else imageio.get_reader(val, 'ffmpeg') for _, val in reader_dict.items()]
+
+        frame_start, frame_end, target = label[idx]
+        frame_start = 1 if frame_start == 0 else frame_start
+
+        frame_no = np.random.randint(frame_start, frame_end+1, 1)[0]
+        tensor_data = self.__get_data(readers, frame_no)
+
         return tensor_data, target
+
+    def __getitem_test__(self, index: int) -> Any:
+        session_key, idx = self.reduce_idx(index) # Find out relevant data directory, dataframe, and reduced index
+
+        reader_dict, label = self.labels[session_key]
+        readers = [val for _, val in reader_dict.items()]
+
+        target = label[label[:, 1] >= idx+1][0, 2]
+
+        frame_no = idx+1
+        tensor_data = self.__get_data(readers, frame_no)
+
+        return tensor_data, target
+
+    def __getitem__(self, index: int) -> Any:
+        if self.mode == 'train':
+            return self.__getitem_train__(index)
+        else:
+            return self.__getitem_test__(index)
 
     def __len__(self) -> int:
         assert(self.n != None)
