@@ -3,11 +3,10 @@ import os
 from random import sample
 
 import torch
-from torch.utils.data import DataLoader
-from torchinfo import summary
-
 from dartorch.data import DARDatasetOnVideos
 from dartorch.models import DrivingActionClassifier
+from torch.utils.data import DataLoader
+from torchinfo import summary
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -28,6 +27,7 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 
     print(f'Target decvice : {device}')
+    print(f'Accessible cmopute : {torch.get_num_threads()}')
 
     model = DrivingActionClassifier(in_size=(args.im_size, args.im_size))
     print(summary(model, (args.batch_size, 15, args.im_size, args.im_size)))
