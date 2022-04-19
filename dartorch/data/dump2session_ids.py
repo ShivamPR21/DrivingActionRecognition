@@ -19,21 +19,10 @@ import argparse
 import os
 from typing import List
 
-import ffmpeg
 import imageio
 import numpy as np
 import pandas as pd
 
-
-def read_frame_as_raw(in_filename, frame_num):
-    out, err = (
-        ffmpeg
-        .input(in_filename)
-        .filter('select', 'gte(n,{})'.format(frame_num))
-        .output('pipe:', vframes=1, format='rawvideo', pix_fmt='gray')
-        .run(capture_stdout=True)
-    )
-    return out
 
 def preprocess_csv(x):
     x[1] = str(x[1]).strip()
