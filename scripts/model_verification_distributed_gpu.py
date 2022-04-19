@@ -1,6 +1,8 @@
 import argparse
 import builtins
 import os
+import socket
+from contextlib import closing
 
 import torch
 import torch.distributed as dist
@@ -10,6 +12,12 @@ from torch.nn.parallel.distributed import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from torchinfo import summary
 
+
+def get_open_port():
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(('', 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
 
 def train_one_epoch(train_loader, model):
     for i, (data, target) in enumerate(train_loader):
@@ -41,6 +49,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    port = get_open_port()
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = str(port)
+
     if "WORLD_SIZE" in os.environ:
         args.world_size = int(os.environ["WORLD_SIZE"])
     args.distributed = args.world_size > 1
@@ -62,7 +74,7 @@ if __name__ == "__main__":
             pass
         builtins.print = print_pass
 
-    device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     print(f'Target decvice : {device}')
 
