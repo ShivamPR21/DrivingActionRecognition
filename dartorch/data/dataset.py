@@ -154,6 +154,8 @@ class DARDatasetOnVideos(Dataset):
         readers = [val if self.load_reader_instances else imageio.get_reader(val, 'ffmpeg') for _, val in reader_dict.items()]
 
         frame_start, frame_end, target = label[idx]
+        target = torch.tensor(target, dtype=torch.long)
+
         frame_start = 1 if frame_start == 0 else frame_start
 
         frame_no = np.random.randint(frame_start, frame_end+1, 1)[0]
@@ -168,6 +170,7 @@ class DARDatasetOnVideos(Dataset):
         readers = [val for _, val in reader_dict.items()]
 
         target = label[label[:, 1] >= idx+1][0, 2]
+        target = torch.tensor(target, dtype=torch.long)
 
         frame_no = idx+1
         tensor_data = self.__get_data(readers, frame_no)

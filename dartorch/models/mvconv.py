@@ -230,7 +230,7 @@ class MultiFrameFeatureMixer(nn.Module):
 
 class Classifier(nn.Module):
 
-    def __init__(self, in_dim: int = 128, n_class: int = 8) -> None:
+    def __init__(self, in_dim: int = 128, n_class: int = 18) -> None:
         super().__init__()
 
         self.in_dim = in_dim
@@ -247,8 +247,8 @@ class Classifier(nn.Module):
         self.linear4 = nn.Linear(128, 64, bias=False)
         self.norm_4 = nn.BatchNorm1d(64)
 
-        self.linear5 = nn.Linear(64, 16)
-        self.linear6 = nn.Linear(16, 8)
+        self.linear5 = nn.Linear(64, 32)
+        self.linear6 = nn.Linear(32, n_class)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.activation(self.linear1(x))
