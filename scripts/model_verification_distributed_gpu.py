@@ -34,6 +34,8 @@ if __name__ == "__main__":
                         help='node rank for distributed training')
     parser.add_argument('--dist-url', default='env://', type=str,
                         help='url used to set up distributed training')
+    parser.add_argument('--dist-backend', default='nccl', type=str,
+                        help='distributed backend')
     parser.add_argument('--local_rank', default=-1, type=int,
                         help='local rank for distributed training')
 
