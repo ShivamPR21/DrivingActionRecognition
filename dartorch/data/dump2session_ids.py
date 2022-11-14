@@ -24,6 +24,17 @@ import numpy as np
 import pandas as pd
 
 
+def _load_video_frames(reader:imageio.plugins.ffmpeg.FfmpegFormat.Reader,
+                       frame_no:int, n_frames:int = 1) -> List[np.ndarray]:
+        reader.set_image_index(frame_no - n_frames)
+        frames = [reader.get_next_data()[:, :, ::-1] for i in range(n_frames)]
+
+        for i in range(len(frames)):
+            frames[i] = frames[i].mean(axis=-1).astype(np.float32)
+            frames[i] /= 255.
+
+        return frames
+
 def preprocess_csv(x):
     x[1] = str(x[1]).strip()
     x[1] = '' if x[1] == 'nan' else x[1]
@@ -96,12 +107,15 @@ def get_cam_views_from_files(files : List[str]) -> List[str]:
 
     return cam_views
 
-def dump_labels_to_session_id_format(root:str,
-                              target:str):
+def dump_to_session_id_format(root:str,
+                              target:str,
+                              n_lag:int):
 
     labeled_dir = os.path.join(root, 'A1')
     target = os.path.join(target, 'A1')
+    target_image_dump_dir = os.path.join(target, 'A1', 'cls_data')
     os.makedirs(target, exist_ok=True)
+    os.makedirs(target_image_dump_dir, exist_ok=True)
 
     # Dumping labeled data
     user_ids_a1 = os.listdir(labeled_dir) # Get the user_id dirs list
@@ -155,16 +169,21 @@ def dump_labels_to_session_id_format(root:str,
             real_file_names = get_actual_file_name(files, id_dir)
             cam_views = get_cam_views_from_files(real_file_names)
             real_file_names_df = pd.DataFrame(np.array([real_file_names, cam_views]).T, columns=['Filename', 'Camview'])
+            real_file_names_df = real_file_names_df.sort(columns=['Camview'])
             real_file_names_df.to_csv(os.path.join(session_id_dir, 'vid_files.csv'), index=False)
 
-            view_video_path = os.path.join(id_dir, real_file_names[0])
+            view_video_path1 = os.path.join(id_dir, real_file_names[0])
+            view_video_path2 = os.path.join(id_dir, real_file_names[1])
+            view_video_path3 = os.path.join(id_dir, real_file_names[2])
 
             # Get video information
-            reader = imageio.get_reader(view_video_path, 'ffmpeg') # probe the video
+            reader1 = imageio.get_reader(view_video_path1, 'ffmpeg') # probe the video
+            reader2 = imageio.get_reader(view_video_path2, 'ffmpeg') # probe the video
+            reader3 = imageio.get_reader(view_video_path3, 'ffmpeg') # probe the video
 
             # Get video information
-            num_frames = reader.get_meta_data()['fps']*reader.get_meta_data()['duration']
-            frame_rate = float(reader.get_meta_data()['fps'])
+            num_frames = reader1.get_meta_data()['fps']*reader1.get_meta_data()['duration']
+            frame_rate = float(reader1.get_meta_data()['fps'])
 
             prev_frame = 0
             for time_patch, label in zip(time_patches, class_ids):
@@ -173,7 +192,20 @@ def dump_labels_to_session_id_format(root:str,
                 if init_frame != prev_frame+1:
                     loc_new_labels += [[min(prev_frame+1, num_frames), min(init_frame-1, num_frames), -1]]
 
-                loc_new_labels += [[min(init_frame, num_frames), min(end_frame, num_frames), label]]
+                init_frame, end_frame = min(init_frame, num_frames), min(end_frame, num_frames)
+                #TODO@ShivamPR21: Dump video to images
+
+                for frame_id in np.arange(init_frame, end_frame)[::n_lag]:
+                    for view_id, reader in enumerate([reader1, reader2, reader3]):
+                        image_dir = os.path.join(target_image_dump_dir, view_id, label)
+                        os.makedirs(image_dir, exist_ok=True)
+
+                        image_path = os.path.join(image_dir, f'{id_}_{session_id}_{frame_id}.png')
+                        image = _load_video_frames(reader, frame_id, 1)[0]
+
+                        imageio.imwrite(image_path, image)
+
+                loc_new_labels += [[init_frame, end_frame, label]]
                 prev_frame = end_frame
 
             session_new_labels = pd.DataFrame(loc_new_labels, columns=['frame_idx_start', 'frame_idx_end', 'class_id'])
@@ -185,8 +217,9 @@ if __name__ == '__main__':
     __HOME_DIR__ = os.getenv('HOME', '~')
     parser.add_argument('root_dir', default='', type=str, help='Root directory path, for AI-City track3 dataset with folder A1, A2, and B')
     parser.add_argument('--target_dir', default=os.path.join(__HOME_DIR__, 'AI-City'), type=str, help='Target directory path to dump the session id format data.')
+    parser.add_argument('--n_lag', default=5, type=int, help="lag b/w two consecutive frames frames.")
     args = parser.parse_args()
 
-    dump_labels_to_session_id_format(args.root_dir, args.target_dir)
+    dump_to_session_id_format(args.root_dir, args.target_dir, args.n_lag)
 
     print(f'Data successfully converted to session id format and stored in the folder {args.target_dir}')
